@@ -18,60 +18,79 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Check Project ZIP
-        run: |
-          if [ ! -f "arulSU-github-build.zip" ]; then
-            echo "File ZIP proyek tidak ditemukan!"
-            ls -la
-            exit 1
-          fi
-
-      - name: Extract Project
+      - name: Install Required Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip
-          mkdir -p source
-          unzip -q arulSU-github-build.zip -d source
 
-          echo "Isi proyek:"
-          find source -maxdepth 3 -type f | head -100
+      - name: Check and Extract Project
+        run: |
+          mkdir -p source
+
+          if [ -f "gradlew" ]; then
+            echo "Gradle Wrapper ditemukan di folder utama."
+            echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+          elif [ -f "arulSU-github-build.zip" ]; then
+            echo "Mengekstrak ZIP proyek..."
+            unzip -q arulSU-github-build.zip -d source
+
+            WRAPPER="$(find source -type f -name gradlew -print -quit)"
+
+            if [ -z "$WRAPPER" ]; then
+              echo "ERROR: gradlew tidak ditemukan di dalam ZIP."
+              echo "Periksa apakah ZIP berisi source code proyek Android."
+              exit 1
+            fi
+
+            PROJECT_DIR="$(dirname "$WRAPPER")"
+            echo "PROJECT_DIR=$GITHUB_WORKSPACE/$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          else
+            echo "ERROR: Gradle Wrapper dan ZIP proyek tidak ditemukan."
+            ls -la
+            exit 1
+          fi
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12266719
+          packages: 'platform-tools'
 
       - name: Build arulSU APK
         run: |
-          WRAPPER="$(find source -type f -name gradlew -print -quit)"
-
-          if [ -z "$WRAPPER" ]; then
-            echo "gradlew tidak ditemukan di dalam ZIP."
-            echo "Periksa apakah ZIP berisi source proyek Android."
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$WRAPPER")"
           cd "$PROJECT_DIR"
 
           chmod +x gradlew
+
           ./gradlew assembleDebug --stacktrace
 
-          mkdir -p "$GITHUB_WORKSPACE/artifacts/apk"
+      - name: Collect APK
+        run: |
+          mkdir -p artifacts/apk
 
-          find . -type f \
+          find "$PROJECT_DIR" \
+            -type f \
             -path '*/build/outputs/apk/*' \
             -name '*.apk' \
-            -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/apk/" \;
+            -exec cp -v {} artifacts/apk/ \;
 
-          if ! ls "$GITHUB_WORKSPACE"/artifacts/apk/*.apk >/dev/null 2>&1; then
-            echo "Build selesai, tetapi APK tidak ditemukan."
+          if ! find artifacts/apk -type f -name '*.apk' \
+            -print -quit | grep -q .; then
+            echo "ERROR: APK tidak ditemukan setelah build."
             exit 1
           fi
+
+          echo "APK berhasil ditemukan:"
+          ls -lh artifacts/apk/
 
       - name: Upload arulSU APK
         uses: actions/upload-artifact@v4
