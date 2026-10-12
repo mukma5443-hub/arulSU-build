@@ -1,0 +1,21 @@
+
+name: Build arulSU APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify source APK
+        run: |
+          APK=$(find . -maxdepth 2 -type f -iname '*.apk' | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "APK asli belum diunggah ke repositori."
+            exit 1
+          fi
+          echo "APK ditemukan: $APK"
