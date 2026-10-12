@@ -24,33 +24,23 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android Build Tools
+      - name: Install Required Tools
         run: |
-          sdkmanager "build-tools;35.0.0"
-          sdkmanager --licenses
+          sudo apt-get update
+          sudo apt-get install -y unzip curl python3
 
-      - name: Find Original APK
+      - name: Find and Extract Original APK
         run: |
-          APK="$(find "$GITHUB_WORKSPACE" \
-            -type f \
-            -name 'BakaSU_v4.2.0-rc3_35226-universal-release.apk' \
-            -print -quit)"
+          mkdir -p package
 
-          if [ -z "$APK" ] && [ -f "arulSU-github-build.zip" ]; then
-            echo "APK tidak ditemukan di folder utama."
-            echo "Memeriksa isi ZIP..."
-            sudo apt-get update
-            sudo apt-get install -y unzip
-            mkdir -p package
-            unzip -q arulSU-github-build.zip -d package
-
-            APK="$(find package -type f \
-              -name 'BakaSU_v4.2.0-rc3_35226-universal-release.apk' \
-              -print -quit)"
+          if [ -f "arulSU-github-build.zip" ]; then
+            unzip -oq arulSU-github-build.zip -d package
           fi
+
+          APK="$(find . -type f \
+            -name 'BakaSU_v4.2.0-rc3_35226-universal-release.apk' \
+            -not -path './decoded/*' \
+            -print -quit)"
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK asli tidak ditemukan."
@@ -58,8 +48,32 @@ jobs:
             exit 1
           fi
 
-          echo "ORIGINAL_APK=$APK" >> "$GITHUB_ENV"
-          echo "APK asli ditemukan."
+          echo "ORIGINAL_APK=$GITHUB_WORKSPACE/${APK#./}" \
+            >> "$GITHUB_ENV"
+
+      - name: Download Android Build Tools
+        run: |
+          curl -fL --retry 3 \
+            -o build-tools.zip \
+            https://dl.google.com/android/repository/build-tools_r35-linux.zip
+
+          mkdir -p build-tools
+          unzip -oq build-tools.zip -d build-tools
+
+          ZIPALIGN="$(find build-tools -type f \
+            -name zipalign -print -quit)"
+          APKSIGNER="$(find build-tools -type f \
+            -name apksigner -print -quit)"
+
+          test -n "$ZIPALIGN"
+          test -n "$APKSIGNER"
+
+          chmod +x "$ZIPALIGN" "$APKSIGNER"
+
+          echo "ZIPALIGN=$GITHUB_WORKSPACE/$ZIPALIGN" \
+            >> "$GITHUB_ENV"
+          echo "APKSIGNER=$GITHUB_WORKSPACE/$APKSIGNER" \
+            >> "$GITHUB_ENV"
 
       - name: Download Apktool
         run: |
@@ -75,59 +89,49 @@ jobs:
             "$ORIGINAL_APK" \
             -o decoded
 
-      - name: Change App Text
+      - name: Update App Text
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          root = Path("decoded")
-          replacements = 0
+          root = Path("decoded/res")
+          count = 0
 
-          for path in root.rglob("*"):
-              if not path.is_file():
-                  continue
+          if not root.exists():
+              raise SystemExit("ERROR: Folder res tidak ditemukan.")
 
-              if path.suffix.lower() not in {
-                  ".xml", ".smali", ".txt"
-              }:
-                  continue
-
+          for path in root.rglob("*.xml"):
               try:
-                  text = path.read_text(encoding="utf-8")
+                  content = path.read_text(encoding="utf-8")
               except (UnicodeDecodeError, OSError):
                   continue
 
-              updated = (
-                  text.replace("BakaSU", "arulSU")
-                      .replace("Baka Su", "arulSU")
-              )
+              updated = content.replace("BakaSU", "arulSU")
+              updated = updated.replace("Baka Su", "arulSU")
 
-              if updated != text:
-                  path.write_text(
-                      updated,
-                      encoding="utf-8"
-                  )
-                  replacements += 1
+              if updated != content:
+                  path.write_text(updated, encoding="utf-8")
+                  count += 1
 
-          print(
-              f"File yang teksnya diubah: {replacements}"
-          )
+          print(f"File resource XML diperbarui: {count}")
           PY
 
-      - name: Build APK
+      - name: Rebuild APK
         run: |
           java -jar apktool.jar b decoded \
             -o arulSU-unsigned.apk
 
           test -s arulSU-unsigned.apk
 
-      - name: Create Temporary Signing Key
+      - name: Create Signing Key
         run: |
           STORE_PASS="$(openssl rand -hex 24)"
           KEY_PASS="$(openssl rand -hex 24)"
 
-          echo "KEYSTORE_PASSWORD=$STORE_PASS" >> "$GITHUB_ENV"
-          echo "KEY_PASSWORD=$KEY_PASS" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=$STORE_PASS" \
+            >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=$KEY_PASS" \
+            >> "$GITHUB_ENV"
 
           keytool -genkeypair -noprompt \
             -keystore "$RUNNER_TEMP/arulSU.keystore" \
@@ -141,13 +145,11 @@ jobs:
 
       - name: Align and Sign APK
         run: |
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
-          "$BUILD_TOOLS/zipalign" -f 4 \
+          "$ZIPALIGN" -f 4 \
             arulSU-unsigned.apk \
             arulSU-aligned.apk
 
-          "$BUILD_TOOLS/apksigner" sign \
+          "$APKSIGNER" sign \
             --ks "$RUNNER_TEMP/arulSU.keystore" \
             --ks-pass env:KEYSTORE_PASSWORD \
             --key-pass env:KEY_PASSWORD \
@@ -155,7 +157,7 @@ jobs:
             --out arulSU.apk \
             arulSU-aligned.apk
 
-          "$BUILD_TOOLS/apksigner" verify --verbose arulSU.apk
+          "$APKSIGNER" verify --verbose arulSU.apk
 
       - name: Upload arulSU APK
         uses: actions/upload-artifact@v4
