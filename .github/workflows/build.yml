@@ -18,84 +18,149 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Required Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip
-
-      - name: Check and Extract Project
-        run: |
-          mkdir -p source
-
-          if [ -f "gradlew" ]; then
-            echo "Gradle Wrapper ditemukan di folder utama."
-            echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-
-          elif [ -f "arulSU-github-build.zip" ]; then
-            echo "Mengekstrak ZIP proyek..."
-            unzip -q arulSU-github-build.zip -d source
-
-            WRAPPER="$(find source -type f -name gradlew -print -quit)"
-
-            if [ -z "$WRAPPER" ]; then
-              echo "ERROR: gradlew tidak ditemukan di dalam ZIP."
-              echo "Periksa apakah ZIP berisi source code proyek Android."
-              exit 1
-            fi
-
-            PROJECT_DIR="$(dirname "$WRAPPER")"
-            echo "PROJECT_DIR=$GITHUB_WORKSPACE/$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          else
-            echo "ERROR: Gradle Wrapper dan ZIP proyek tidak ditemukan."
-            ls -la
-            exit 1
-          fi
-
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: 12266719
-          packages: 'platform-tools'
 
-      - name: Build arulSU APK
+      - name: Install Android Build Tools
         run: |
-          cd "$PROJECT_DIR"
+          sdkmanager "build-tools;35.0.0"
+          sdkmanager --licenses
 
-          chmod +x gradlew
-
-          ./gradlew assembleDebug --stacktrace
-
-      - name: Collect APK
+      - name: Find Original APK
         run: |
-          mkdir -p artifacts/apk
-
-          find "$PROJECT_DIR" \
+          APK="$(find "$GITHUB_WORKSPACE" \
             -type f \
-            -path '*/build/outputs/apk/*' \
-            -name '*.apk' \
-            -exec cp -v {} artifacts/apk/ \;
+            -name 'BakaSU_v4.2.0-rc3_35226-universal-release.apk' \
+            -print -quit)"
 
-          if ! find artifacts/apk -type f -name '*.apk' \
-            -print -quit | grep -q .; then
-            echo "ERROR: APK tidak ditemukan setelah build."
+          if [ -z "$APK" ] && [ -f "arulSU-github-build.zip" ]; then
+            echo "APK tidak ditemukan di folder utama."
+            echo "Memeriksa isi ZIP..."
+            sudo apt-get update
+            sudo apt-get install -y unzip
+            mkdir -p package
+            unzip -q arulSU-github-build.zip -d package
+
+            APK="$(find package -type f \
+              -name 'BakaSU_v4.2.0-rc3_35226-universal-release.apk' \
+              -print -quit)"
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK asli tidak ditemukan."
+            find . -maxdepth 4 -type f
             exit 1
           fi
 
-          echo "APK berhasil ditemukan:"
-          ls -lh artifacts/apk/
+          echo "ORIGINAL_APK=$APK" >> "$GITHUB_ENV"
+          echo "APK asli ditemukan."
+
+      - name: Download Apktool
+        run: |
+          curl -fL --retry 3 \
+            -o apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar
+
+          test -s apktool.jar
+
+      - name: Decode Original APK
+        run: |
+          java -jar apktool.jar d -f \
+            "$ORIGINAL_APK" \
+            -o decoded
+
+      - name: Change App Text
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("decoded")
+          replacements = 0
+
+          for path in root.rglob("*"):
+              if not path.is_file():
+                  continue
+
+              if path.suffix.lower() not in {
+                  ".xml", ".smali", ".txt"
+              }:
+                  continue
+
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except (UnicodeDecodeError, OSError):
+                  continue
+
+              updated = (
+                  text.replace("BakaSU", "arulSU")
+                      .replace("Baka Su", "arulSU")
+              )
+
+              if updated != text:
+                  path.write_text(
+                      updated,
+                      encoding="utf-8"
+                  )
+                  replacements += 1
+
+          print(
+              f"File yang teksnya diubah: {replacements}"
+          )
+          PY
+
+      - name: Build APK
+        run: |
+          java -jar apktool.jar b decoded \
+            -o arulSU-unsigned.apk
+
+          test -s arulSU-unsigned.apk
+
+      - name: Create Temporary Signing Key
+        run: |
+          STORE_PASS="$(openssl rand -hex 24)"
+          KEY_PASS="$(openssl rand -hex 24)"
+
+          echo "KEYSTORE_PASSWORD=$STORE_PASS" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=$KEY_PASS" >> "$GITHUB_ENV"
+
+          keytool -genkeypair -noprompt \
+            -keystore "$RUNNER_TEMP/arulSU.keystore" \
+            -storepass "$STORE_PASS" \
+            -keypass "$KEY_PASS" \
+            -alias arulsu \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=arulSU, OU=Build, O=Local, C=ID"
+
+      - name: Align and Sign APK
+        run: |
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
+          "$BUILD_TOOLS/zipalign" -f 4 \
+            arulSU-unsigned.apk \
+            arulSU-aligned.apk
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/arulSU.keystore" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --ks-key-alias arulsu \
+            --out arulSU.apk \
+            arulSU-aligned.apk
+
+          "$BUILD_TOOLS/apksigner" verify --verbose arulSU.apk
 
       - name: Upload arulSU APK
         uses: actions/upload-artifact@v4
         with:
-          name: arulSU-APK
-          path: artifacts/apk/*.apk
+          name: arulSU-apk
+          path: arulSU.apk
           if-no-files-found: error
           retention-days: 7
