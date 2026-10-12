@@ -1,89 +1,120 @@
-
 name: Build arulSU APK
 
 on:
-  workflow_dispatch:
+workflow_dispatch:
+
+permissions:
+contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+build:
+runs-on: ubuntu-latest
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      
-      
-
-      - name: Install Android build tools
-        run: sdkmanager "build-tools;35.0.0"
-
-      - name: Install Apktool
-        run: |
-          curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/latest/download/apktool_2.11.1.jar || \
-          curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/latest/download/apktool.jar
-
-      - name: Decode original APK
-        run: java -jar apktool.jar d -f BakaSU_v4.2.0-rc3_35226-universal-release.apk -o decoded
-
-      - name: Change visible app label to arulSU
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          root = Path('decoded')
-          replacements = 0
-          for p in root.rglob('*'):
-              if not p.is_file() or p.suffix.lower() not in {'.xml', '.smali', '.txt'}:
-                  continue
-              try:
-                  s = p.read_text(encoding='utf-8')
-              except (UnicodeDecodeError, OSError):
-                  continue
-              new = s.replace('BakaSU', 'arulSU').replace('Baka Su', 'arulSU')
-              if new != s:
-                  p.write_text(new, encoding='utf-8')
-                  replacements += 1
-          print(f'Updated text in {replacements} file(s).')
-          PY
-
-      - name: Build APK
-        run: java -jar apktool.jar b decoded -o arulSU-unsigned.apk
-
-      - name: Create signing key
-        run: |
-          keytool -genkeypair -v \
-            -keystore "$RUNNER_TEMP/arulSU.keystore" \
-            -storepass "$KEYSTORE_PASSWORD" \
-            -keypass "$KEY_PASSWORD" \
-            -alias arulsu -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=arulSU, OU=Build, O=Local, L=Unknown, ST=Unknown, C=ID"
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'temporary-build-password' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'temporary-build-password' }}
-
-      - name: Align and sign APK
-        run: |
-          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f 4 arulSU-unsigned.apk arulSU-aligned.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-            --ks "$RUNNER_TEMP/arulSU.keystore" \
-            --ks-pass env:KEYSTORE_PASSWORD \
-            --key-pass env:KEY_PASSWORD \
-            --out arulSU.apk arulSU-aligned.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose arulSU.apk
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'temporary-build-password' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'temporary-build-password' }}
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: arulSU-apk
-          path: arulSU.apk
-          if-no-files-found: error
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
+  - name: Set up Java
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: '17'
+  - name: Set up Android SDK
+    uses: android-actions/setup-android@v3
+  - name: Install Android build tools
+    run: |
+      yes | sdkmanager --licenses
+      sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+  - name: Find original APK
+    id: source
+    shell: bash
+    run: |
+      APK=$(find . -maxdepth 2 -type f -iname '*.apk' \
+        ! -path './output/*' | head -n 1)
+      if [ -z "$APK" ]; then
+        echo "APK sumber tidak ditemukan di repositori."
+        exit 1
+      fi
+      echo "apk=$APK" >> "$GITHUB_OUTPUT"
+      echo "APK sumber: $APK"
+  - name: Download Apktool
+    run: |
+      python3 - <<'PY'
+      import json
+      import urllib.request
+      url = "https://api.github.com/repos/iBotPeaches/Apktool/releases/latest"
+      req = urllib.request.Request(
+          url, headers={"User-Agent": "GitHub-Actions"}
+      )
+      with urllib.request.urlopen(req) as response:
+          release = json.load(response)
+      assets = [
+          a for a in release["assets"]
+          if a["name"].endswith(".jar")
+          and a["name"].startswith("apktool_")
+          and "small" not in a["name"]
+      ]
+      if not assets:
+          raise SystemExit("File JAR Apktool tidak ditemukan.")
+      asset = assets[0]
+      req = urllib.request.Request(
+          asset["browser_download_url"],
+          headers={"User-Agent": "GitHub-Actions"}
+      )
+      with urllib.request.urlopen(req) as response:
+          data = response.read()
+      with open("apktool.jar", "wb") as f:
+          f.write(data)
+      PY
+  - name: Decode original APK
+    run: |
+      java -jar apktool.jar d \
+        "${{ steps.source.outputs.apk }}" \
+        -f -o decoded
+  - name: Change visible app label
+    run: |
+      python3 - <<'PY'
+      from pathlib import Path
+      root = Path("decoded/res")
+      count = 0
+      for p in root.rglob("*.xml"):
+          try:
+              text = p.read_text(encoding="utf-8")
+          except (UnicodeDecodeError, OSError):
+              continue
+          updated = text.replace("BakaSU", "arulSU")
+          if updated != text:
+              p.write_text(updated, encoding="utf-8")
+              count += 1
+      print(f"File resource yang diperbarui: {count}")
+      PY
+  - name: Build unsigned APK
+    run: |
+      java -jar apktool.jar b decoded -o unsigned.apk
+  - name: Create signing key
+    run: |
+      keytool -genkeypair \
+        -keystore signing-key.jks \
+        -storepass android \
+        -keypass android \
+        -alias arulsu \
+        -keyalg RSA \
+        -keysize 2048 \
+        -validity 10000 \
+        -dname "CN=arulSU, OU=Build, O=Local, L=Unknown, ST=Unknown, C=ID"
+  - name: Align and sign APK
+    run: |
+      mkdir -p output
+      zipalign -f -p 4 unsigned.apk aligned.apk
+      apksigner sign \
+        --ks signing-key.jks \
+        --ks-pass pass:android \
+        --key-pass pass:android \
+        --out output/arulSU.apk \
+        aligned.apk
+      apksigner verify --verbose output/arulSU.apk
+  - name: Upload APK artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: arulSU-APK
+      path: output/arulSU.apk
+      if-no-files-found: error
